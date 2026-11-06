@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 
 from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from .browser import memory_mb
 from .models import ATTENTION, HELD, Applicant, Settings, State, utcnow
@@ -47,6 +48,8 @@ class Controller:
         self.hold_since = None
         self.warned = False
         self.possible_available = False
+        self.stage = "READY"
+        self.last_notification_test = None
         self._last_inspect = self._last_sensors = self.clock() - timedelta(minutes=1)
         self.persist()
 
@@ -82,7 +85,10 @@ class Controller:
         eligible = any(p.enabled and not p.booked for p in self.profiles)
         scheduled = (self.monitoring and self.settings.automatic and not self.paused and
                      not self.busy and self.state not in HELD and not self.browser.alive and eligible)
+        allowed = next_check(self.settings, self.last_check, now, self.failures)
         return {"state": self.state.value, "monitoring": self.monitoring, "paused": self.paused,
+            "busy": self.busy, "stage": self.stage, "automatic": self.settings.automatic,
+            "next_allowed_check": allowed.isoformat(),
             "active_profile": self.active.label if self.active else None, "active_id": self.active_id,
             "last_check": self.last_check.isoformat() if self.last_check else None,
             "next_check": next_check(self.settings, self.last_check, now, self.failures).isoformat() if scheduled else None,
@@ -116,6 +122,10 @@ class Controller:
         profile = self.select(profile_id)
         self.check_task = asyncio.create_task(self._check(profile))
 
+    def progress(self, code):
+        self.stage = code
+        self.storage.event(self.active_id, code)
+
     async def _check(self, profile):
         async with self.lock:
             self.active_id = self.last_id = profile.id
@@ -129,9 +139,12 @@ class Controller:
             self.transition(State.NAVIGATING, "CHECK_STARTED", notice=False)
             try:
                 async with asyncio.timeout(150):
+                    self.progress("BROWSER_STARTING")
                     await self.browser.start()
                     portal = self.portal_factory(self.browser)
+                    portal.progress = self.progress
                     result = await portal.run(profile, lambda: self.transition(State.CHECKING, "REQUEST_RESULT", notice=False))
+                self.stage = "CHECK_FINISHED"
                 if result.state == State.NO_SLOTS:
                     self.failures = 0
                     self.transition(result.state, result.code, notice=False)
@@ -146,12 +159,22 @@ class Controller:
             except asyncio.CancelledError:
                 # Handoff cancels automation, never browser/context/page.
                 raise
-            except (TimeoutError, PlaywrightError, OSError):
+            except (TimeoutError, PlaywrightError, OSError) as exc:
                 self.failures += 1
                 self.paused = self.browser.alive
                 if self.browser.alive:
                     self.hold_since = self.clock()
-                self.transition(State.ERROR, "NETWORK_OR_BROWSER_ERROR")
+                code = "BROWSER_START_FAILED" if self.stage == "BROWSER_STARTING" else "NETWORK_OR_BROWSER_ERROR"
+                if self.stage == "PORTAL_OPENING":
+                    if isinstance(exc, (TimeoutError, PlaywrightTimeout)):
+                        code = "PORTAL_LOAD_TIMEOUT"
+                    elif "ERR_NAME_NOT_RESOLVED" in str(exc):
+                        code = "PORTAL_DNS_ERROR"
+                    elif "ERR_CERT_" in str(exc):
+                        code = "PORTAL_TLS_ERROR"
+                    elif "ERR_CONNECTION_" in str(exc):
+                        code = "PORTAL_CONNECTION_ERROR"
+                self.transition(State.ERROR, code)
             except Exception:
                 self.failures += 1
                 self.paused = True
@@ -159,7 +182,9 @@ class Controller:
             finally:
                 self.persist()
 
-    async def takeover(self):
+    async def takeover(self, *, interrupt=True):
+        if self.busy and not interrupt:
+            raise Conflict("Проверка ещё выполняется. Дождитесь результата; открытие страницы просмотра не останавливает её.")
         self.paused = True
         self.human = True
         # Also handles a check task reserved but not started yet.
@@ -182,6 +207,15 @@ class Controller:
 
     async def command(self, action, data=None):
         data = data or {}
+        if action == "test_notifications":
+            if not (self.settings.telegram_enabled or self.settings.smtp_enabled or self.settings.ha_notifications):
+                raise Conflict("Сначала включите и сохраните хотя бы один канал уведомлений")
+            if self.last_notification_test and self.clock() - self.last_notification_test < timedelta(seconds=60):
+                raise Conflict("Повторная проверка уведомлений доступна через минуту")
+            self.last_notification_test = self.clock()
+            self.notifications.emit(None, State.IDLE, code="NOTIFICATION_TEST")
+            self.storage.event(None, "NOTIFICATION_TEST_QUEUED")
+            return
         if action == "check":
             await self.request_check(data.get("profile_id"))
             return
