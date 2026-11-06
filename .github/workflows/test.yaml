@@ -1,0 +1,25 @@
+name: Local fixtures and native container builds
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build add-on on the native architecture
+        run: docker build -t barcelona-cita:test barcelona_cita
+      - name: Build local test runner
+        run: docker build -f Dockerfile.test -t barcelona-cita:tests .
+      - name: Run all tests including headed VNC handoff
+        run: docker run --rm --memory=1500m barcelona-cita:tests
+      - name: Verify SIGTERM and restart
+        run: python3 scripts/container_smoke.py

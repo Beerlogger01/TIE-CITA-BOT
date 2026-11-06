@@ -1,0 +1,13 @@
+# syntax=docker/dockerfile:1
+FROM barcelona-cita:test
+WORKDIR /repo
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -s /run/secrets/proxy_ca ]; then export PIP_CERT=/run/secrets/proxy_ca; fi; \
+    pip install --no-cache-dir pytest==9.2.0 pytest-asyncio==1.4.1.post1 PyYAML==6.0.3
+COPY --chown=cita:cita tests /repo/tests
+COPY --chown=cita:cita pyproject.toml /repo/pyproject.toml
+COPY --chown=cita:cita barcelona_cita/config.yaml /repo/barcelona_cita/config.yaml
+COPY --chown=cita:cita barcelona_cita/src /repo/barcelona_cita/src
+ENV PYTHONPATH=/repo/barcelona_cita
+USER cita
+ENTRYPOINT ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--basetemp=/tmp/cita-tests"]
