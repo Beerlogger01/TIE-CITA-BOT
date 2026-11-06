@@ -135,9 +135,12 @@ class Portal:
         await (await self.visible(loc)).fill(value)
 
     async def run(self, applicant, checking):
+        report = getattr(self, "progress", lambda code: None)
         try:
+            report("PORTAL_OPENING")
             await self.page.goto(self.url, wait_until="domcontentloaded")
             await self.guard()
+            report("PROVINCE_SELECTION")
             await self.option_select(lambda t: t == "barcelona")
             # Some versions display the procedure on the province screen, others after Aceptar.
             has_procedure = await self.option_select(lambda t: "toma de huellas" in t and
@@ -145,10 +148,12 @@ class Portal:
             if not has_procedure:
                 await self.click("Aceptar", "#btnAceptar")
             await self.option_select(lambda t: "cualquier oficina" in t, optional=True)
+            report("PROCEDURE_SELECTION")
             if not has_procedure:
                 await self.option_select(lambda t: "toma de huellas" in t and "expedicion de tarjeta" in t)
             await self.click("Aceptar", "#btnAceptar")
             await self.click("Presentación sin Cl@ve", "#btnEntrar")
+            report("APPLICANT_FORM")
             # If the portal asks explicitly for document type, choose NIE, never impersonate Cl@ve.
             radio = self.page.get_by_role("radio", name=re.compile(r"^NIE$", re.I))
             if await radio.count() == 1 and await radio.is_visible():
@@ -159,6 +164,7 @@ class Portal:
                             "#txtDesCitado, input[name='txtDesCitado']", applicant.full_name)
             await self.option_select(lambda t: t == normalized(applicant.nationality))
             await self.click("Aceptar", "#btnEnviar")
+            report("REQUESTING_APPOINTMENT")
             # Intermediate warnings (including no-slots text) are not availability results.
             await self.click("Solicitar Cita", "#btnEnviar")
             checking()

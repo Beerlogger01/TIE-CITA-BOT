@@ -89,7 +89,8 @@ def create_app(controller, *, trusted_peer="172.30.32.2", novnc_path=Path("/usr/
         protocols = request.headers.get("Sec-WebSocket-Protocol", "").split(",")
         if f"cita-csrf.{csrf}" not in [p.strip() for p in protocols]:
             raise web.HTTPForbidden()
-        await controller.takeover()  # cancel and await all Playwright writes before permitting input
+        # Merely opening the viewer must not cancel an in-flight page.goto (about:blank).
+        await controller.takeover(interrupt=False)
         ws = web.WebSocketResponse(protocols=["binary"], heartbeat=25, max_msg_size=4 * 1024 * 1024)
         await ws.prepare(request)
         controller.viewers += 1

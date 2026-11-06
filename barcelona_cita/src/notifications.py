@@ -35,6 +35,10 @@ class Notifications:
                 f"{utcnow().astimezone(ZoneInfo('Europe/Madrid')).strftime('%d.%m.%Y %H:%M:%S %Z')}\n"
                 f"{MESSAGES.get(state, 'Проверьте состояние системы.')}"
                 + ("\nВремя ожидания истекает; доступность места не гарантируется." if code == "SESSION_WARNING" else ""))
+        if code == "NOTIFICATION_TEST":
+            text = ("Barcelona TIE Cita — тест уведомлений\n"
+                    f"{utcnow().astimezone(ZoneInfo('Europe/Madrid')).strftime('%d.%m.%Y %H:%M:%S %Z')}\n"
+                    "Канал отправки работает. Это тест, свободная запись не обнаружена.")
         try:
             self.queue.put_nowait((profile.id if profile else None, text))
         except asyncio.QueueFull:

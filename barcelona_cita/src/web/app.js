@@ -1,7 +1,8 @@
 let csrf = '', profileData = [], settingsData = {};
 const $ = s => document.querySelector(s);
 const states = {IDLE:'Ожидание',NAVIGATING:'Переход по страницам',CHECKING:'Проверка ответа',NO_SLOTS:'Записей нет',POSSIBLE_SLOTS:'Возможны записи',AWAITING_USER:'Требуется человек',BOOKING_IN_PROGRESS:'Ручное оформление',BOOKED:'Подтверждение обнаружено',SESSION_EXPIRED:'Сессия неактуальна',BLOCKED:'Доступ ограничен',ERROR:'Техническая ошибка'};
-const responses = {NO_SLOTS:'En este momento no hay citas disponibles',POSSIBLE_SLOTS_UNRESERVED:'Следующий шаг доступен; место не зарезервировано',UNKNOWN_PAGE:'Неизвестный экран — требуется человек',HUMAN_VERIFICATION_REQUIRED:'CAPTCHA / SMS — требуется человек',PORTAL_BLOCKED:'Портал ограничил доступ'};
+const responses = {NO_SLOTS:'En este momento no hay citas disponibles',POSSIBLE_SLOTS_UNRESERVED:'Следующий шаг доступен; место не зарезервировано',UNKNOWN_PAGE:'Неизвестный экран — требуется человек',HUMAN_VERIFICATION_REQUIRED:'CAPTCHA / SMS — требуется человек',PORTAL_BLOCKED:'Портал ограничил доступ',PORTAL_LOAD_TIMEOUT:'Портал не загрузился за отведённое время',PORTAL_DNS_ERROR:'Не удалось определить адрес портала (DNS)',PORTAL_TLS_ERROR:'Ошибка проверки сертификата портала',PORTAL_CONNECTION_ERROR:'Не удалось установить соединение с порталом',BROWSER_START_FAILED:'Не удалось запустить Chromium',USER_TAKEOVER:'Управление передано пользователю'};
+const stages={READY:'Готов к проверке',BROWSER_STARTING:'Запуск Chromium',PORTAL_OPENING:'Открытие официального портала (до 40 секунд)',PROVINCE_SELECTION:'Выбор Barcelona',PROCEDURE_SELECTION:'Выбор процедуры',APPLICANT_FORM:'Заполнение данных заявителя',REQUESTING_APPOINTMENT:'Solicitar Cita — ожидание ответа',CHECK_FINISHED:'Проверка завершена'};
 const time = v => v ? new Date(v).toLocaleString('ru-RU', {timeZone:'Europe/Madrid'}) : '—';
 function feedback(text, error=false) { $('#feedback').textContent=text; $('#feedback').className=error?'error':'success'; }
 async function api(path, data) {
@@ -14,14 +15,15 @@ async function refresh() {
     const s=await api('api/status');csrf=s.csrf;
     $('#state').textContent=states[s.state] || s.state;
     $('#status').replaceChildren();
-    for (const [label,value] of Object.entries({'Заявитель':s.active_profile||'—','Последняя проверка':time(s.last_check),'Следующая проверка':time(s.next_check),'Проверок сегодня':s.checks_today,'Ответ портала':responses[s.last_response]||s.last_response,'Браузер':s.browser_alive?'Сессия открыта':'Закрыт','Управление':s.human_control?'У пользователя':'Автоматическое','Расписание':s.paused?'Пауза':s.monitoring?'Запущено':'Остановлено','Возможная запись':s.possible_slots?'Требует проверки; не зарезервирована':'Не обнаружена / неактуальна','Память контейнера':s.memory_mb+' МБ'})) {
+    for (const [label,value] of Object.entries({'Заявитель':s.active_profile||'—','Последняя проверка':time(s.last_check),'Следующая проверка':time(s.next_check),'Ручная проверка разрешена с':time(s.next_allowed_check),'Текущий шаг':stages[s.stage]||s.stage,'Проверок сегодня':s.checks_today,'Ответ портала':responses[s.last_response]||s.last_response,'Браузер':s.browser_alive?'Сессия открыта':'Закрыт','Управление':s.human_control?'У пользователя':'Автоматическое','Расписание':s.paused?'Пауза':!s.automatic?'Автоматическое расписание выключено':s.monitoring?'Запущено':'Остановлено','Возможная запись':s.possible_slots?'Требует проверки; не зарезервирована':'Не обнаружена / неактуальна','Память контейнера':s.memory_mb+' МБ'})) {
       const el=item('div','');el.append(item('span',label),item('strong',String(value)));$('#status').append(el);
     }
+    $('#activity').textContent=s.busy?'Проверка выполняется. Открытие браузера дождётся результата и не прервёт загрузку.':!s.automatic?'Для регулярного поиска включите «Автоматическое расписание» и сохраните настройки. «Проверить сейчас» запускает одну проверку.':s.paused?'Мониторинг на паузе. Открытие браузера передаёт управление человеку.':'Ожидание следующей проверки. Минимальный интервал — 15 минут.';
     $('#bookings').replaceChildren(...s.bookings.map(b=>item('p',`${b.profile===1?'Антон':'Наталья'} · ${b.appointment} · ${b.office}`)));
     $('#events').replaceChildren(...s.events.slice(0,40).map(e=>item('p',`${time(e.at)} · ${e.profile===1?'Антон':e.profile===2?'Наталья':'Система'} · ${e.code}`)));
   } catch(e) { feedback(e.message,true); }
 }
-async function command(action, extra={}) { await api('api/command',{action,...extra}); await refresh();feedback('Команда принята.'); }
+async function command(action, extra={}) { await api('api/command',{action,...extra}); await refresh();feedback(action==='test_notifications'?'Тест поставлен в очередь. Проверьте сообщение и NOTIFY_*_SENT / FAILED в журнале.':'Команда принята.'); }
 document.querySelectorAll('[data-action]').forEach(b=>b.onclick=()=>command(b.dataset.action).catch(e=>feedback(e.message,true)));
 $('#switch').onclick=()=>command('select',{profile_id:Number($('#select-profile').value)}).catch(e=>feedback(e.message,true));
 $('#discard').onclick=()=>{if(window.confirm('Закрыть текущую вкладку и потерять возможность продолжения?'))command('discard').catch(e=>feedback(e.message,true));};
