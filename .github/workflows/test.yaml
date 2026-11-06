@@ -1,6 +1,7 @@
 name: Local fixtures and native container builds
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -10,13 +11,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            platform: linux/arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Build add-on on the native architecture
-        run: docker build -t barcelona-cita:test barcelona_cita
+      - name: Build add-on with Supervisor arguments on the native architecture
+        # The legacy Alpine override must not change our pinned Debian FROM.
+        run: |
+          CITA_VERSION=$(awk -F'"' '/^version:/ {print $2}' barcelona_cita/config.yaml)
+          docker build --platform '${{ matrix.platform }}' \
+            --build-arg BUILD_ARCH='${{ matrix.arch }}' \
+            --build-arg BUILD_VERSION="$CITA_VERSION" \
+            --build-arg BUILD_FROM=ghcr.io/home-assistant/base:latest \
+            --label io.hass.arch='${{ matrix.arch }}' \
+            --label io.hass.version="$CITA_VERSION" \
+            --label io.hass.type=app \
+            -t barcelona-cita:test barcelona_cita
       - name: Build local test runner
         run: docker build -f Dockerfile.test -t barcelona-cita:tests .
       - name: Run all tests including headed VNC handoff
