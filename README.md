@@ -34,7 +34,7 @@ python3 scripts/container_smoke.py
 
 В управляемой среде с HTTPS proxy добавьте к обеим сборкам `--secret id=proxy_ca,src=/путь/к/доверенному/ca-bundle.pem`. Сертификат используется только при сборке и не включается в образ. Проверка TLS остаётся включённой.
 
-CI `.github/workflows/test.yaml` выполняет сборку и тесты на **нативных amd64 и ARM64** runner'ах; запуск workflow в этом рабочем каталоге сам по себе не производится. Для сборки на amd64 с `--platform linux/arm64` потребуется настроенный эмулятор; предпочтительна нативная сборка.
+CI `.github/workflows/test.yaml` выполняет сборку и тесты на **нативных amd64 и ARM64** runner'ах. [Проверка кода в PR прошла успешно](https://github.com/Beerlogger01/TIE-CITA-BOT/actions/runs/42225980984): на каждой архитектуре 39 тестов, включая графический noVNC, и проверка SIGTERM/перезапуска контейнера. Для сборки на amd64 с `--platform linux/arm64` потребуется настроенный эмулятор; предпочтительна нативная сборка. Физический Pi и HA OS ещё требуют проверки.
 
 Runtime-зависимости закреплены с хешами в `barcelona_cita/requirements.lock`; noVNC 1.7.0 — с SHA256 архива; базовый Python-образ — с digest мультиархитектурного manifest. Debian Bookworm получает совместимые обновления безопасности; фактические версии пакетов сохраняются в `/app/system-packages.txt` внутри образа. Это не архивный snapshot Debian.
 
