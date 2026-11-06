@@ -70,3 +70,11 @@
 7. Корректность фиксации **реального** подтверждения: номер, дата и заголовок должны распознаваться на действующей странице. Пока проверен только локальный макет. Бот не заявлен как способный автоматически завершать бронирование.
 
 До этих проверок нельзя утверждать, что все критерии готовности из ТЗ выполнены, или что add-on уже испытан на официальном портале. Исходники и установочная конфигурация подготовлены для выполнения этих проверок владельцем; автоматическое окончательное подтверждение отключено.
+
+## Исправление установки через Supervisor: 0.2.1
+
+Реальный лог Home Assistant OS для 0.2.0 показал `FROM ghcr.io/home-assistant/base:latest` и `/bin/ash: apt-get: not found`, exit 127. Причина подтверждена по валидатору Supervisor: legacy `build.yaml` не принимал `python:...@sha256:...`, после ошибки применялось стандартное Alpine `BUILD_FROM`. Предыдущий CI запускал Docker напрямую и не моделировал эту подстановку.
+
+Ошибка воспроизведена локально на исходном Dockerfile с `--build-arg BUILD_FROM=ghcr.io/home-assistant/base:latest`: сборка завершилась с той же командой `apt-get: not found` и exit 127. В 0.2.1 удалён `build.yaml`, Debian-образ с digest указан непосредственно в `FROM`. CI теперь передаёт legacy Alpine аргумент вместе с аргументами/метками Supervisor на нативных amd64 и ARM64 runner'ах; smoke-тест проверяет реальную Debian Bookworm базу и метки HA в собранном образе. Для окончательной проверки установки требуется повторить установку 0.2.1 на устройстве пользователя.
+
+Источники: [валидатор build config](https://github.com/home-assistant/supervisor/blob/main/supervisor/apps/validate.py), [подстановка base image](https://github.com/home-assistant/supervisor/blob/main/supervisor/apps/build.py), [миграция сборок Home Assistant](https://contributors.home-assistant.io/blog/2026/04/02/builder-migration/).

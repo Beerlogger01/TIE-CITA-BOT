@@ -34,6 +34,13 @@ try:
     ready()
     info = json.loads(docker("inspect", name))[0]
     assert not info["HostConfig"]["Privileged"] and not info["HostConfig"]["PortBindings"]
+    assert info["Config"]["Labels"]["io.hass.type"] == "app"
+    # Check the base selected by the actual build, not just the Dockerfile text.
+    docker("exec", name, "python", "-c", """from pathlib import Path
+release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
+assert release['ID'].strip('"') == 'debian'
+assert release['VERSION_CODENAME'].strip('"') == 'bookworm'
+""")
     # /proc status avoids requiring procps in the image.
     docker("exec", name, "python", "-c", """from pathlib import Path
 import stat
@@ -58,7 +65,7 @@ assert found
     ready()
     docker("exec", name, "python", "-c", "from pathlib import Path; from src.storage import Storage; s=Storage(Path('/data')); assert s.get('smoke_marker')=='persistent'; s.close()")
     docker("stop", "--time", "40", name)
-    print("PASS: entrypoint, Ingress peer rejection, uid 1000, private storage, SIGTERM, persistent restart")
+    print("PASS: Debian base, HA image labels, entrypoint, Ingress peer rejection, uid 1000, private storage, SIGTERM, persistent restart")
 finally:
     subprocess.run([*DOCKER, "rm", "-f", name], capture_output=True)
     subprocess.run([*DOCKER, "volume", "rm", volume], capture_output=True)

@@ -1,5 +1,5 @@
 name: Barcelona TIE Cita
-version: "0.2.0"
+version: "0.2.1"
 url: https://github.com/Beerlogger01/TIE-CITA-BOT
 slug: barcelona_cita
 description: "Локальный поиск TIE в Barcelona с передачей текущей сессии человеку"
