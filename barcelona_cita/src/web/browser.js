@@ -6,13 +6,13 @@ async function connect() {
   const response=await fetch('api/status',{cache:'no-store'});const status=await response.json();
   if(disconnected)return;
   if(status.busy){document.getElementById('warning').textContent='Автоматическая проверка продолжается. Подключение управления произойдёт после её завершения.';connection.textContent='Идёт автоматическая проверка. Ожидаем результат; управление ещё не передано.';setTimeout(()=>connect().catch(()=>connection.textContent='Ошибка подключения'),3000);return;}
-  if(!status.browser_alive){connection.textContent='Активной сессии нет. Вернитесь в панель.';return;}
+  if(!status.desktop_available){connection.textContent='Пригодной сессии нет. Вернитесь в панель и используйте «Восстановить работу».';return;}
   document.getElementById('warning').textContent='Подключение к текущей вкладке приостановит автоматизацию. Сохранение сессии не резервирует место.';
   const url=new URL('ws',location.href);url.protocol=location.protocol==='https:'?'wss:':'ws:';
   rfb=new RFB(document.getElementById('screen'),url.href,{wsProtocols:['binary','cita-csrf.'+status.csrf]});
   rfb.scaleViewport=true;rfb.resizeSession=false;rfb.showDotCursor=true;
   rfb.addEventListener('connect',()=>connection.textContent='Текущая сессия · ручное управление');
-  rfb.addEventListener('disconnect',()=>connection.textContent='Отключено. Автоматизация остаётся на паузе; при незавершённой проверке вернитесь в панель.');
+  rfb.addEventListener('disconnect',()=>connection.textContent='Отключено. Управление освобождено. Вернитесь в панель для завершения сессии и возобновления мониторинга.');
 }
 document.getElementById('disconnect').onclick=()=>{disconnected=true;rfb?.disconnect();connection.textContent='Подключение отключено.';};
 const keyboard=document.getElementById('keyboard-input');

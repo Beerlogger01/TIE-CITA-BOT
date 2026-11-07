@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Supervisor must not replace Debian with its legacy Alpine BUILD_FROM fallback.
 FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
-ARG BUILD_VERSION=0.2.2
+ARG BUILD_VERSION=0.3.0
 LABEL io.hass.type="app" io.hass.version="${BUILD_VERSION}"
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 DISPLAY=:99 \
     PLAYWRIGHT_BROWSERS_PATH=/opt/playwright HOME=/home/cita

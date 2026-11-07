@@ -16,7 +16,7 @@ from aiohttp.test_utils import TestServer
 from playwright.async_api import expect
 
 from src.browser import Browser, Desktop
-from src.controller import Controller
+from src.controller import Controller, Conflict
 from src.models import Settings, State
 from src.notifications import Notifications
 from src.portal import Portal
@@ -84,11 +84,30 @@ async def test_notification_link_controls_existing_tab(controller, mock_portal, 
     controller.browser = target
     controller.portal_factory = lambda b: Portal(b, url=mock_portal["url"])
     controller.settings = Settings(telegram_enabled=True, telegram_token="TEST_ONLY",
-        telegram_chat_ids=["123"], ingress_url="https://ha.example.invalid/hassio/ingress/local_barcelona_cita",
+        telegram_polling_enabled=True, ingress_url="https://ha.example.invalid/hassio/ingress/local_barcelona_cita",
         ha_notifications=False)
     notifications = Notifications(lambda: controller.settings, controller.storage)
     controller.notifications = notifications
     payloads = []
+    invitations = [notifications.recipients.invite(controller.settings) for _ in range(2)]
+    registered = asyncio.Event()
+    updates_sent = False
+    async def telegram_api(token, method, payload):
+        nonlocal updates_sent
+        if method == 'getWebhookInfo':
+            return {'url':''}
+        if method == 'getUpdates':
+            if updates_sent:
+                await asyncio.Event().wait()
+            updates_sent = True
+            return [{'update_id':i+1,'message':{'chat':{'id':1001+i,'type':'private','first_name':'TEST'},
+                                              'text':'/start '+code}} for i,code in enumerate(invitations)]
+        if method == 'sendMessage':
+            if payload['chat_id'] == '1002':
+                registered.set()
+            return {}
+        raise AssertionError('Unexpected Telegram method')
+    monkeypatch.setattr(notifications.receiver,'api',telegram_api)
     async def capture(url, payload, **kwargs):
         assert controller.paused and target.alive
         payloads.append(payload)
@@ -96,11 +115,12 @@ async def test_notification_link_controls_existing_tab(controller, mock_portal, 
     try:
         await desktop.start()
         notifications.start()
+        await asyncio.wait_for(registered.wait(),5)
         await controller.request_check()
         await controller.check_task
         await asyncio.wait_for(notifications.queue.join(), 5)
         assert controller.state == State.POSSIBLE_SLOTS and controller.paused
-        assert len(payloads) == 1
+        assert len(payloads) == 2
         link = payloads[0]["reply_markup"]["inline_keyboard"][0][0]["url"]
         page, context, browser_object = target.page, target.context, target.browser
         url_before = page.url
@@ -121,7 +141,7 @@ async def test_notification_link_controls_existing_tab(controller, mock_portal, 
             errors = []
             client_browser.page.on("pageerror", lambda e: errors.append(str(e)))
             await client_browser.page.goto(str(gateway.make_url(urlsplit(link).path)))
-            await client_browser.page.get_by_role("link", name="Открыть текущий браузер").click()
+            await client_browser.page.get_by_role("link", name="Открыть рабочий стол").click()
             await expect(client_browser.page.locator("#connection")).to_contain_text("ручное управление", timeout=15000)
             assert controller.human and controller.paused and controller.viewers == 1
             assert target.page is page and target.context is context and target.browser is browser_object
@@ -144,7 +164,12 @@ async def test_notification_link_controls_existing_tab(controller, mock_portal, 
                 if controller.viewers == 0:
                     break
                 await asyncio.sleep(.05)
-            assert controller.viewers == 0 and controller.paused
+            assert controller.viewers == 0 and controller.paused and not controller.human
+            with pytest.raises(Conflict):
+                await controller.command("recover")
+            assert target.page is page
+            await controller.command("recover", {"confirm_discard": True})
+            assert controller.state == State.IDLE and not target.alive
     finally:
         await client_browser.close()
         await controller.close()

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 
 from .models import ATTENTION, State, utcnow
+from .telegram import Recipients, Receiver
 
 MESSAGES = {
     State.POSSIBLE_SLOTS: "Возможна свободная запись. Требуется ручное подтверждение на портале. Браузер сохранён. Место не зарезервировано.",
@@ -26,9 +27,13 @@ class Notifications:
         self.storage = storage
         self.queue = asyncio.Queue(maxsize=30)
         self.worker = None
+        self.recipients = Recipients(storage)
+        self.receiver = Receiver(settings, storage, self.recipients, lambda: self.monitor_status())
+        self.monitor_status = lambda: 'Состояние мониторинга пока недоступно.'
 
     def start(self):
         self.worker = asyncio.create_task(self._worker())
+        self.receiver.start()
 
     def emit(self, profile, state, *, code=None):
         text = (f"{profile.label if profile else 'Система'} · {state.value}\n"
@@ -39,6 +44,12 @@ class Notifications:
             text = ("Barcelona TIE Cita — тест уведомлений\n"
                     f"{utcnow().astimezone(ZoneInfo('Europe/Madrid')).strftime('%d.%m.%Y %H:%M:%S %Z')}\n"
                     "Канал отправки работает. Это тест, свободная запись не обнаружена.")
+        elif state == State.POSSIBLE_SLOTS:
+            text = ("🇪🇸 Barcelona TIE\n\n🔔 Возможно, появилась свободная запись!\n"
+                    f"Заявитель: {profile.label if profile else 'Система'}\n"
+                    "Статус: требуется завершить оформление\n"
+                    f"{utcnow().astimezone(ZoneInfo('Europe/Madrid')).strftime('%d.%m.%Y %H:%M:%S %Z')}\n\n"
+                    "Нажмите «Открыть рабочий стол», чтобы продолжить оформление в текущей сессии браузера. Место не зарезервировано.")
         try:
             self.queue.put_nowait((profile.id if profile else None, text))
         except asyncio.QueueFull:
@@ -59,16 +70,19 @@ class Notifications:
         tasks = []
         # Separate recipient requests, always from the configured allowlist.
         if s.telegram_enabled:
-            for chat in s.telegram_chat_ids:
+            chats = self.recipients.effective(s)
+            if not chats:
+                self.storage.event(profile, 'NOTIFY_TELEGRAM_NO_RECIPIENTS')
+            for chat in chats:
                 if s.ha_telegram_action:
                     domain, action = s.ha_telegram_action.split(".")
                     payload = {"message": text, "target": [chat], "data": {
-                        "inline_keyboard": [[f"Открыть текущую сессию:{s.ingress_url}"]]}}
+                        "inline_keyboard": [[f"🖥 Открыть рабочий стол:{s.ingress_url}"]]}}
                     tasks.append(("TELEGRAM", self.ha(f"services/{domain}/{action}", payload)))
                 else:
                     payload = {"chat_id": chat, "text": text, "protect_content": True,
                                "reply_markup": {"inline_keyboard": [[{
-                                   "text": "Открыть текущую сессию", "url": s.ingress_url}]]}}
+                                   "text": "🖥 Открыть рабочий стол", "url": s.ingress_url}]]}}
                     tasks.append(("TELEGRAM", self.post(
                         f"https://api.telegram.org/bot{s.telegram_token}/sendMessage", payload)))
         if s.ha_notifications:
@@ -139,6 +153,7 @@ class Notifications:
             self.storage.event(None, "HA_SENSORS_FAILED")
 
     async def close(self):
+        await self.receiver.close()
         if self.worker:
             try:
                 await asyncio.wait_for(self.queue.join(), 15)
