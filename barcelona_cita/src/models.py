@@ -72,6 +72,7 @@ class Settings(Model):
     ha_notifications: bool = True
     ha_sensors: bool = True
     telegram_enabled: bool = False
+    telegram_polling_enabled: bool = False
     telegram_token: str = Field(default="", max_length=200, repr=False)
     telegram_chat_ids: list[str] = Field(default_factory=list, max_length=10)
     ha_telegram_action: str = Field(default="", max_length=100)
@@ -122,9 +123,10 @@ class Settings(Model):
             raise ValueError("Неверный диапазон дат")
         if self.session_warning_minutes >= self.session_expiry_minutes:
             raise ValueError("Предупреждение должно предшествовать истечению")
-        if self.telegram_enabled and (not self.ingress_url or not self.telegram_chat_ids
-                                      or not (self.telegram_token or self.ha_telegram_action)):
-            raise ValueError("Для Telegram нужны HTTPS ссылка, получатели и token либо HA notify")
+        if self.telegram_enabled and (not self.ingress_url or not (self.telegram_token or self.ha_telegram_action)):
+            raise ValueError("Для Telegram нужны HTTPS ссылка и token либо HA notify")
+        if self.telegram_polling_enabled and (not self.telegram_enabled or not self.telegram_token or self.ha_telegram_action):
+            raise ValueError("Приём команд требует включённого прямого Telegram token, без HA notify")
         if self.smtp_enabled and (not self.smtp_host or not self.smtp_sender or not self.smtp_recipients):
             raise ValueError("Для SMTP нужны сервер, отправитель и получатели")
         if any("\n" in x or "\r" in x for x in [self.smtp_sender, *self.smtp_recipients]):

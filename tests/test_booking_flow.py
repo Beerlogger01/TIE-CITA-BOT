@@ -26,7 +26,7 @@ async def test_verified_confirmation_stops_first_profile_and_continues_second(co
     assert controller.state == State.BOOKED and controller.profiles[0].booked
     assert browser.alive and controller.paused
     assert controller.storage.bookings()[0]["profile"] == 1
-    await controller.command("discard")
+    await controller.command("discard", {"confirm_discard": True})
     await controller.command("resume")
     clock.now += timedelta(minutes=15)
     mock_portal["outcome"] = "no_slots"

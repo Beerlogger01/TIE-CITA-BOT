@@ -56,8 +56,29 @@ def create_app(controller, *, trusted_peer="172.30.32.2", novnc_path=Path("/usr/
 
     async def command(request):
         data = await request.json()
-        await controller.command(data["action"], data)
-        return web.json_response({"ok": True})
+        return web.json_response(await controller.command(data["action"], data))
+
+    async def telegram(request):
+        notifications = controller.notifications
+        if request.method == 'GET':
+            return web.json_response({'users':notifications.recipients.users(controller.settings),
+                                      'receiver':notifications.receiver.state})
+        data = await request.json()
+        action = data.get('action')
+        if action == 'invite':
+            if not controller.settings.telegram_polling_enabled:
+                raise Conflict('Сначала включите и сохраните приём Telegram-команд с отдельным token бота.')
+            if notifications.receiver.state in {'TELEGRAM_WEBHOOK_CONFLICT','TELEGRAM_POLLING_CONFLICT','TELEGRAM_AUTH_ERROR'}:
+                raise Conflict('Приём Telegram-команд остановлен из-за конфликта или ошибки token. Устраните причину и повторите проверку подключения.')
+            code = notifications.recipients.invite(controller.settings)
+            return web.json_response({'ok':True,'code':code,'expires_in':600})
+        if action == 'remove':
+            notifications.recipients.remove(controller.settings,data['chat_id'])
+            return web.json_response({'ok':True,'message':'Подписка отключена. Мониторинг продолжается.'})
+        if action == 'restart':
+            notifications.receiver.restart()
+            return web.json_response({'ok':True,'message':'Приём команд повторно проверит webhook и конфликты. Мониторинг не изменён.'})
+        raise Conflict('Неизвестное действие Telegram')
 
     async def profiles(request):
         if request.method == "GET":
@@ -116,6 +137,12 @@ def create_app(controller, *, trusted_peer="172.30.32.2", novnc_path=Path("/usr/
             controller.storage.event(None, "VNC_CONNECTION_FAILED")
         finally:
             controller.viewers -= 1
+            if controller.viewers == 0:
+                controller.human = False
+                if controller.state.value == 'BOOKING_IN_PROGRESS':
+                    from ..models import State
+                    controller.transition(State.AWAITING_USER,'DESKTOP_DISCONNECTED',notice=False)
+                controller.persist()
             # Disconnecting a viewer NEVER resumes automation.
             await ws.close()
         return ws
@@ -123,6 +150,8 @@ def create_app(controller, *, trusted_peer="172.30.32.2", novnc_path=Path("/usr/
     app.router.add_get("/", index)
     app.router.add_get("/api/status", status)
     app.router.add_post("/api/command", command)
+    app.router.add_get('/api/telegram', telegram)
+    app.router.add_post('/api/telegram', telegram)
     app.router.add_get("/api/profiles", profiles)
     app.router.add_post("/api/profiles", profiles)
     app.router.add_get("/api/settings", settings)

@@ -43,6 +43,8 @@ class Controller:
             self.last_response = "RESTART_SESSION_LOST"
         self.check_task = self.loop_task = None
         self.lock = asyncio.Lock()
+        self.control_lock = asyncio.Lock()
+        self.protected_session = False
         self.human = False
         self.viewers = 0
         self.hold_since = None
@@ -51,6 +53,7 @@ class Controller:
         self.stage = "READY"
         self.last_notification_test = None
         self._last_inspect = self._last_sensors = self.clock() - timedelta(minutes=1)
+        self._last_health = self._last_inspect
         self.persist()
 
     @property
@@ -67,6 +70,18 @@ class Controller:
             "paused": self.paused, "active_id": self.active_id, "last_id": self.last_id,
             "last_check": self.last_check.isoformat() if self.last_check else None,
             "count_day": self.count_day, "checks_today": self.checks_today, "failures": self.failures})
+
+    def browser_status(self):
+        alive = self.browser.alive
+        blank = getattr(self.browser, 'is_blank', False)
+        responsive = getattr(self.browser, 'responsive', True)
+        present = getattr(self.browser,'usable',alive and not blank and responsive)
+        usable = present and self.state not in {State.BLOCKED,State.SESSION_EXPIRED}
+        return {'process_running':getattr(self.browser,'process_running',alive),
+                'portal_loaded':getattr(self.browser,'portal_loaded',False),
+                'session_usable':usable, 'page_present':present, 'blank':blank, 'hung':alive and not responsive,
+                'manual_required':self.state in HELD or self.human,
+                'protected':self.protected_session}
 
     def transition(self, state, code, *, notice=True):
         validate_transition(self.state, state)
@@ -89,6 +104,7 @@ class Controller:
         return {"state": self.state.value, "monitoring": self.monitoring, "paused": self.paused,
             "busy": self.busy, "stage": self.stage, "automatic": self.settings.automatic,
             "next_allowed_check": allowed.isoformat(),
+            "browser":self.browser_status(), "desktop_available":self.browser_status()['session_usable'],
             "active_profile": self.active.label if self.active else None, "active_id": self.active_id,
             "last_check": self.last_check.isoformat() if self.last_check else None,
             "next_check": next_check(self.settings, self.last_check, now, self.failures).isoformat() if scheduled else None,
@@ -153,6 +169,7 @@ class Controller:
                     # Stop all scheduling BEFORE queuing the first notification.
                     self.paused = True
                     self.possible_available = result.state == State.POSSIBLE_SLOTS
+                    self.protected_session |= self.possible_available
                     self.hold_since = self.clock()
                     self.failures += result.state == State.ERROR
                     self.transition(result.state, result.code)
@@ -175,6 +192,11 @@ class Controller:
                     elif "ERR_CONNECTION_" in str(exc):
                         code = "PORTAL_CONNECTION_ERROR"
                 self.transition(State.ERROR, code)
+                if getattr(self.browser, 'is_blank', False) and not self.protected_session:
+                    await self.release_browser()
+                    self.paused = False
+                    self.hold_since = None
+                    self.human = False
             except Exception:
                 self.failures += 1
                 self.paused = True
@@ -185,6 +207,8 @@ class Controller:
     async def takeover(self, *, interrupt=True):
         if self.busy and not interrupt:
             raise Conflict("Проверка ещё выполняется. Дождитесь результата; открытие страницы просмотра не останавливает её.")
+        if not self.browser_status()['session_usable']:
+            raise Conflict("Рабочий стол недоступен: нет пригодной страницы портала. Используйте «Восстановить работу».")
         self.paused = True
         self.human = True
         # Also handles a check task reserved but not started yet.
@@ -205,8 +229,95 @@ class Controller:
             self.hold_since = self.clock()
         self.persist()
 
+    async def cancel_check(self):
+        if self.busy:
+            task = self.check_task
+            task.cancel()
+            done,_ = await asyncio.wait({task}, timeout=4)
+            if not done:
+                if not self.protected_session:
+                    await self.release_browser()
+                task.cancel()
+                done,_ = await asyncio.wait({task}, timeout=2)
+                if not done:
+                    raise Conflict("Операция ещё завершается. Новая проверка заблокирована; повторите восстановление.")
+
+    async def release_browser(self):
+        task = asyncio.create_task(self.browser.close())
+        done,_ = await asyncio.wait({task},timeout=8)
+        if not done:
+            task.cancel()
+            force = getattr(self.browser, 'force_close', None)
+            if force:
+                force()
+            done,_ = await asyncio.wait({task},timeout=1)
+        if done:
+            await asyncio.gather(task, return_exceptions=True)
+        if self.browser.alive:
+            raise Conflict("Браузер ещё не освобождён. Повторите восстановление; новые проверки пока запрещены.")
+
+    async def recover(self, data):
+        if self.viewers:
+            raise Conflict("Отключите рабочий стол, затем повторите восстановление.")
+        if self.state == State.BLOCKED and data.get('acknowledge_block') is not True:
+            raise Conflict("Портал ограничил доступ. Восстановление требует явного подтверждения после устранения причины блокировки.")
+        self.monitoring, self.paused = False, True
+        await self.cancel_check()
+        if (self.protected_session or self.browser_status()['page_present']) and data.get('confirm_discard') is not True:
+            if self.state in {State.NAVIGATING, State.CHECKING}:
+                self.transition(State.AWAITING_USER, 'RECOVERY_REQUIRES_CONFIRMATION', notice=False)
+            self.persist()
+            raise Conflict("Текущая сессия сохранена. Для её закрытия подтвердите потерю текущей страницы и возможной записи.")
+        await self.release_browser()
+        self.human = self.possible_available = self.protected_session = False
+        self.hold_since = None
+        self.warned = False
+        self.paused = False
+        self.state, self.stage, self.last_response = State.IDLE, 'READY', 'RECOVERY_COMPLETED'
+        if self.active and not self.active.booked:
+            self.active.status = State.IDLE
+        self.storage.event(self.active_id, 'RECOVERY_COMPLETED')
+        self.persist()
+        return 'Работа восстановлена. Браузер освобождён; можно начать мониторинг. Ограничения частоты сохранены.'
+
     async def command(self, action, data=None):
+        if self.control_lock.locked():
+            raise Conflict("Предыдущее действие ещё выполняется. Дождитесь результата.")
+        async with self.control_lock:
+            result = await self._command(action, data)
+            messages = {'check':'Однократная проверка запущена.', 'test_notifications':'Тест поставлен в очередь. Результат доставки появится в журнале.',
+                        'start':'Мониторинг включён.', 'resume':'Мониторинг продолжен.', 'pause':'Мониторинг приостановлен.',
+                        'discard':'Текущая сессия закрыта.', 'reset':'Ошибка сброшена.', 'select':'Заявитель переключён.', 'verify':'Подтверждение проверено.'}
+            return {'ok':True, 'message':result or messages.get(action,'Действие выполнено.'), 'state':self.state.value}
+
+    async def _command(self, action, data=None):
         data = data or {}
+        if action == 'recover':
+            return await self.recover(data)
+        if action == 'monitor_start':
+            self.select()
+            if self.busy and self.monitoring:
+                return 'Мониторинг уже работает.'
+            if self.browser.alive or self.state in HELD or self.protected_session:
+                raise Conflict('Сначала завершите ручную сессию или используйте «Восстановить работу».')
+            self.settings.automatic = True
+            self.storage.put('settings',self.settings.model_dump(mode='json'))
+            self.monitoring, self.paused, self.human = True, False, False
+            self.persist()
+            return 'Мониторинг включён. Следующая проверка запланирована с соблюдением минимального интервала.'
+        if action in {'monitor_stop','stop'}:
+            self.monitoring, self.paused = False, True
+            await self.cancel_check()
+            if self.protected_session or self.browser_status()['session_usable']:
+                if self.state in {State.NAVIGATING,State.CHECKING}:
+                    self.transition(State.AWAITING_USER,'MONITORING_STOPPED_SESSION_SAVED',notice=False)
+                self.persist()
+                return 'Мониторинг остановлен. Текущая сессия сохранена; её закрытие требует подтверждения.'
+            await self.release_browser()
+            self.state, self.stage, self.last_response = State.IDLE,'READY','MONITORING_STOPPED'
+            self.human = False
+            self.persist()
+            return 'Мониторинг остановлен. Неиспользуемый браузер освобождён.'
         if action == "test_notifications":
             if not (self.settings.telegram_enabled or self.settings.smtp_enabled or self.settings.ha_notifications):
                 raise Conflict("Сначала включите и сохраните хотя бы один канал уведомлений")
@@ -234,10 +345,13 @@ class Controller:
                 raise Conflict("Сначала завершите текущую сессию; она не будет перезагружена")
             self.monitoring, self.paused, self.human = True, False, False
         elif action == "discard":
+            if self.protected_session and data.get('confirm_discard') is not True:
+                raise Conflict('Подтвердите потерю сессии с возможной записью.')
             if self.busy or self.viewers:
                 raise Conflict("Остановите проверку и отключите noVNC перед закрытием сессии")
             await self.browser.close()
             self.human = self.possible_available = False
+            self.protected_session = False
             self.hold_since = None
             self.warned = False
             self.paused = True
@@ -306,6 +420,21 @@ class Controller:
 
     async def tick(self):
         now = self.clock()
+        if (self.browser.alive or getattr(self.browser,'process_running',False)) and not self.busy and now-self._last_health >= timedelta(seconds=15):
+            self._last_health = now
+            probe = getattr(self.browser,'probe',None)
+            if probe:
+                await probe()
+            facts = self.browser_status()
+            if (facts['blank'] or facts['hung']) and not self.protected_session and not self.viewers and self.state != State.BLOCKED:
+                await self.release_browser()
+                self.human = False
+                self.state, self.last_response = State.ERROR,'UNUSABLE_BROWSER_RELEASED'
+                self.paused = False
+                self.hold_since = None
+                self.failures += 1
+                self.storage.event(self.active_id, 'UNUSABLE_BROWSER_RELEASED')
+                self.persist()
         if self.browser.alive and not self.busy and self.state in HELD | {State.ERROR}:
             if self.hold_since:
                 elapsed = now - self.hold_since

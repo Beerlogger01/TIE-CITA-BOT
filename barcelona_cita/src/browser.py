@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -61,12 +62,64 @@ class Desktop:
 
 
 class Browser:
+    SHUTDOWN_TIMEOUT = 3
     def __init__(self, *, headless=False, executable_path=None):
         self.headless = headless
         self.executable_path = executable_path
         self.playwright = self.browser = self.context = self.page = None
         self.http_status = None
         self.extra_tab_blocked = False
+        self.processes = {}
+        self.responsive = True
+
+    @staticmethod
+    def descendants():
+        records = {}
+        for file in Path('/proc').glob('[0-9]*/stat'):
+            try:
+                fields = file.read_text().rsplit(')',1)[1].split()
+                records[int(file.parent.name)] = (int(fields[1]),fields[19])
+            except (OSError,ValueError,IndexError):
+                pass
+        owned = {os.getpid()}
+        while True:
+            more = {pid for pid,(parent,_) in records.items() if parent in owned}
+            if more <= owned:
+                break
+            owned |= more
+        return {pid:records[pid][1] for pid in owned if pid != os.getpid()}
+
+    @property
+    def process_running(self):
+        return bool(self.browser and self.browser.is_connected())
+
+    @property
+    def is_blank(self):
+        try:
+            return not self.page or self.page.is_closed() or self.page.url in ('','about:blank')
+        except Exception:
+            return True
+
+    @property
+    def portal_loaded(self):
+        from urllib.parse import urlsplit
+        try:
+            u = urlsplit(self.page.url)
+            return u.scheme == 'https' and u.hostname == 'icp.administracionelectronica.gob.es'
+        except Exception:
+            return False
+
+    @property
+    def usable(self):
+        return self.alive and not self.is_blank and self.responsive and self.page.url.startswith(('https://','http://'))
+
+    async def probe(self):
+        try:
+            await asyncio.wait_for(self.page.locator('body').count(), 2)
+            self.responsive = True
+        except Exception:
+            self.responsive = False
+        return self.responsive
 
     @property
     def alive(self):
@@ -75,6 +128,9 @@ class Browser:
     async def start(self):
         if self.alive:
             raise RuntimeError("SESSION_ALREADY_EXISTS")
+        if self.browser or self.playwright:
+            await self.close()
+        before = self.descendants()
         try:
             self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch(
@@ -97,8 +153,11 @@ class Browser:
             self.page.on("dialog", lambda dialog: dialog.dismiss())
             self.http_status = None
             self.extra_tab_blocked = False
+            self.responsive = True
+            self.processes = {pid:start for pid,start in self.descendants().items() if pid not in before}
             return self.page
         except BaseException:
+            self.processes.update({pid:start for pid,start in self.descendants().items() if pid not in before})
             await self.close()
             raise
 
@@ -112,13 +171,56 @@ class Browser:
             self.http_status = response.status
 
     async def close(self):
+        # Refresh owned descendants before graceful shutdown can orphan them.
+        for pid,start in list(self.processes.items()):
+            try:
+                fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()
+                if fields[19] != start:
+                    del self.processes[pid]
+            except (OSError,ValueError,IndexError):
+                del self.processes[pid]
+        all_processes = self.descendants()
+        for pid,start in list(all_processes.items()):
+            try:
+                current = pid
+                while current not in self.processes and current != os.getpid():
+                    fields = Path(f'/proc/{current}/stat').read_text().rsplit(')',1)[1].split()
+                    current = int(fields[1])
+                if current in self.processes:
+                    self.processes[pid] = start
+            except (OSError,ValueError,IndexError):
+                pass
         try:
             if self.browser:
-                await self.browser.close()
+                try:
+                    await asyncio.wait_for(self.browser.close(), self.SHUTDOWN_TIMEOUT)
+                except Exception:
+                    pass
         finally:
             if self.playwright:
-                await self.playwright.stop()
-            self.playwright = self.browser = self.context = self.page = None
+                # Do not cancel the driver's transport waiter before it reaps its
+                # process/pipes. Kill our processes on timeout, then let it finish.
+                stop_task = asyncio.create_task(self.playwright.stop())
+                done,_ = await asyncio.wait({stop_task}, timeout=self.SHUTDOWN_TIMEOUT)
+                if not done:
+                    self.force_close()
+                    done,_ = await asyncio.wait({stop_task}, timeout=1)
+                if not done:
+                    stop_task.cancel()
+                await asyncio.gather(stop_task, return_exceptions=True)
+            self.force_close()
+
+    def force_close(self):
+        # Kill only this launch's recorded processes, with PID reuse protection.
+        for pid,start in self.processes.items():
+            try:
+                fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()
+                if fields[19] == start:
+                    os.kill(pid, signal.SIGKILL)
+            except (OSError,ValueError,IndexError):
+                pass
+        self.processes.clear()
+        self.playwright = self.browser = self.context = self.page = None
 
 
 def memory_mb():

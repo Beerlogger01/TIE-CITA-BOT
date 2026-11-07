@@ -21,6 +21,11 @@ async def main():
     controller = None
     notifications = Notifications(lambda: controller.settings, storage)
     controller = Controller(storage, browser, notifications)
+    notifications.monitor_status = lambda: (
+        f"Barcelona TIE\nСостояние: {controller.state.value}\n"
+        f"Профиль: {controller.active.label if controller.active else '—'}\n"
+        f"Мониторинг: {'включён' if controller.monitoring else 'выключен'}\n"
+        f"Пауза: {'да' if controller.paused else 'нет'}")
     app = create_app(controller)
 
     async def lifecycle(app):
